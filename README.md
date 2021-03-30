@@ -5,7 +5,7 @@ Utilise Cplex 12.* et tensorflow 2
 
 
 
-Dossier instances :
+Dossier instances (A DEZIPER) :
 	Contient les topologies, les instances ainsi que les paramètres des fonctions
 	
 Dossier resultsCSV :
