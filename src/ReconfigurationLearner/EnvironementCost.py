@@ -16,6 +16,7 @@ from Util import DynamicTopologyDrawer
 from allocation import allocILP
 from reconfiguration import reconfController
 from Chooser import ObjectifChooser
+from Chooser import ReconfigurationChooser
 
 import AllocateurDynamic
 import initializeNetworkDynamic
@@ -202,12 +203,6 @@ class ReconfigurationEnvironement(py_environment.PyEnvironment):
             print("ReconfigurationEnvironement : I can't reset, there is no more instances, I'm empty :'(")
             return False
         
-        """self.dictReward = {}
-        self.listCostReconf = [0, 500, 1000, 1500, 2000, 2500, 3000, 3500, 4000]
-        self.listVersionReward = [1,2]
-        for i in self.listVersionReward:
-            for j in self.listCostReconf:
-                self.dictReward["Reward-{}_Cost-{}".format(i,j)] = []"""
         
         self.instanceNum = self.listInstanceFiles[0].split("-")[-1:][0]
         self.instanceName = "{}-S{}".format(self.listInstanceFiles[0][:-(1+len(self.instanceNum))], self.TopologySettings)
@@ -333,18 +328,31 @@ class ReconfigurationEnvironement(py_environment.PyEnvironment):
         objectifChooser = ObjectifChooser.ObjectifChooser([1])
         reconfChooser = self
         self.allocateur = AllocateurDynamic.AllocateurDynamic(name, self.topology, self.nbVnf, self.costMaxVnf, capaDC, capaLink, self.functions, currentAlloc, currentPaths, listSlicesCurrentlyAllocated, objectifChooser, reconfChooser, True, self.nbSteps)
-
-
+        
+        if self.rewardVersion == 4:
+            name = "NoReconf_Beta-1"
+            objectifChooser = ObjectifChooser.ObjectifChooser([1])
+            reconfChooser = ReconfigurationChooser.ReconfigurationChooser(param.startDynamic)
+            self.allocateurNoReconf = AllocateurDynamic.AllocateurDynamic(name, self.topology, self.nbVnf, self.costMaxVnf, capaDC, capaLink, self.functions, currentAlloc, currentPaths, listSlicesCurrentlyAllocated, objectifChooser, reconfChooser, None, self.nbSteps)
+        
+        
         #self.nbSlicesAddSinceLastReconf = len(listSlicesAccepted)
         #self.nbSlicesDeadSinceReconf = len(listSlicesCurrentlyAllocated)
         
         self.timeStep = param.startDynamic
         self.nbMinutesSinceLastReconf = param.startDynamic
 
+
+
+        """    #################################################################################################################    """
+        """                  We add one slice, because each step start with a reconf in the environement                            """
+        """    #################################################################################################################    """ 
         
         slices = self.scenario.getNewSlices() 
         for s in slices:
             self.allocateur.addSlice(s, self.timeStep)
+            if self.rewardVersion == 4:
+                self.allocateurNoReconf.addSlice(s, self.timeStep)
             if len(self.allocateur.listSlicesAccepted)>0:
                 if self.allocateur.listSlicesAccepted[-1].id == s.id:
                     self.nbSlicesAddSinceLastReconf+=1
@@ -359,26 +367,42 @@ class ReconfigurationEnvironement(py_environment.PyEnvironment):
 
         self.allocateur.removeSlices(self.timeStep)
         self.nbSlicesRemoveSinceLastReconf += nbSlices-len(self.allocateur.listSlicesCurrentlyAllocated)
+        if self.rewardVersion == 4:
+            self.allocateurNoReconf.removeSlices(self.timeStep)
         
         self._state = self.makeState()
 
         #print("Debug Env : Reset Stop")
         return ts.restart(np.array([self._state], dtype=np.float32))
     
-    
-    def fakeAlloc(self, listListSlices):
+    def fakeAlloc(self, allocateur, listListSlices):
         
         listSlicesAdd = []
-        listSlicesAllocated = self.allocateur.listSlicesCurrentlyAllocated.copy()
+        listSlicesAllocated = allocateur.listSlicesCurrentlyAllocated.copy()
         timeStep = self.timeStep
         
-        linksUsage, nodesUsage, nodeFunction =  Util.utilisationAndVnfUsed(self.functions, listSlicesAllocated, self.allocateur.currentAlloc, roundNumber = 8)
+        linksUsage, nodesUsage, nodeFunction =  Util.utilisationAndVnfUsed(self.functions, listSlicesAllocated, allocateur.currentAlloc, roundNumber = 8)
         
         bwAllocated = []
         CostVnfsUsed = []
         profit = []
         
-        for i in range(len(listListSlices)):
+        tmp = 0
+        tmp2 = 0  
+        for s in listSlicesAllocated:
+            tmp += s.bd
+            tmp2 += s.revenuPerTimeStep
+        bwAllocated.append(tmp)
+                
+        linksUsage, nodesUsage, nodeFunction =  Util.utilisationAndVnfUsed(self.functions, listSlicesAllocated, allocateur.currentAlloc, roundNumber = 8)
+        tmp = 0
+        for u in nodesUsage:
+            for f in nodeFunction[u]:
+                tmp += self.functions[f][1]
+        CostVnfsUsed.append(tmp)
+        profit.append(tmp2 - tmp)
+        
+        for i in range(len(listListSlices)-1):
             timeStep += 1
             listSlices = listListSlices[i]
             if listSlices == None:
@@ -390,9 +414,9 @@ class ReconfigurationEnvironement(py_environment.PyEnvironment):
                 if allocPossible :
                     listSlicesAdd.append(s)
                     listSlicesAllocated.append(s)
-                    self.allocateur.currentAlloc[s.id] = currentAllocTMP[s.id]
-                    self.allocateur.currentPaths[s.id] = dictPathTMP[s.id]
-                    linksUsage, nodesUsage, nodeFunction =  Util.utilisationAndVnfUsed(self.functions, listSlicesAllocated, self.allocateur.currentAlloc, roundNumber = 8)
+                    allocateur.currentAlloc[s.id] = currentAllocTMP[s.id]
+                    allocateur.currentPaths[s.id] = dictPathTMP[s.id]
+                    linksUsage, nodesUsage, nodeFunction =  Util.utilisationAndVnfUsed(self.functions, listSlicesAllocated, allocateur.currentAlloc, roundNumber = 8)
              
 
                 
@@ -411,7 +435,7 @@ class ReconfigurationEnvironement(py_environment.PyEnvironment):
                 tmp2 += s.revenuPerTimeStep
             bwAllocated.append(tmp)
                     
-            linksUsage, nodesUsage, nodeFunction =  Util.utilisationAndVnfUsed(self.functions, listSlicesAllocated, self.allocateur.currentAlloc, roundNumber = 8)
+            linksUsage, nodesUsage, nodeFunction =  Util.utilisationAndVnfUsed(self.functions, listSlicesAllocated, allocateur.currentAlloc, roundNumber = 8)
             tmp = 0
             for u in nodesUsage:
                 for f in nodeFunction[u]:
@@ -421,14 +445,73 @@ class ReconfigurationEnvironement(py_environment.PyEnvironment):
             
 
         for s in listSlicesAdd:
-            if s.id in self.allocateur.currentPaths:
-                del(self.allocateur.currentPaths[s.id])
-            if s.id in self.allocateur.currentAlloc:
-                del(self.allocateur.currentAlloc[s.id])
+            if s.id in allocateur.currentPaths:
+                del(allocateur.currentPaths[s.id])
+            if s.id in allocateur.currentAlloc:
+                del(allocateur.currentAlloc[s.id])
                 
         return CostVnfsUsed, bwAllocated, profit
     
     
+    def realAlloc(self, allocateur, listListSlices):
+
+        timeStep = self.timeStep
+        allocateur.update(timeStep, remove = False)
+        linksUsage, nodesUsage, nodeFunction =  Util.utilisationAndVnfUsed(self.functions, allocateur.listSlicesCurrentlyAllocated, allocateur.currentAlloc, roundNumber = 8)
+        
+        bwAllocated = []
+        CostVnfsUsed = []
+        profit = []
+        
+        tmp = 0
+        tmp2 = 0  
+        for s in allocateur.listSlicesCurrentlyAllocated:
+            tmp += s.bd
+            tmp2 += s.revenuPerTimeStep
+        bwAllocated.append(tmp)
+                
+        linksUsage, nodesUsage, nodeFunction =  Util.utilisationAndVnfUsed(self.functions, allocateur.listSlicesCurrentlyAllocated, allocateur.currentAlloc, roundNumber = 8)
+        tmp = 0
+        for u in nodesUsage:
+            for f in nodeFunction[u]:
+                tmp += self.functions[f][1]
+        CostVnfsUsed.append(tmp)
+        profit.append(tmp2 - tmp)
+        
+        
+        for i in range(len(listListSlices)):
+            timeStep += 1
+            listSlices = listListSlices[i]
+            if listSlices == None:
+                break
+            for s in listSlices:
+                    
+
+                allocateur.addSlice(s, timeStep)
+            if i < len(listListSlices)-1:
+                allocateur.update(timeStep)
+                
+                tmp = 0
+                tmp2 = 0  
+                for s in allocateur.listSlicesCurrentlyAllocated:
+                    tmp += s.bd
+                    tmp2 += s.revenuPerTimeStep
+                bwAllocated.append(tmp)
+                        
+                linksUsage, nodesUsage, nodeFunction =  Util.utilisationAndVnfUsed(self.functions, allocateur.listSlicesCurrentlyAllocated, allocateur.currentAlloc, roundNumber = 8)
+                tmp = 0
+                for u in nodesUsage:
+                    for f in nodeFunction[u]:
+                        tmp += self.functions[f][1]
+                CostVnfsUsed.append(tmp)
+                profit.append(tmp2 - tmp)
+                
+            else:
+                allocateur.removeSlices(timeStep)
+                    
+            
+            
+        return CostVnfsUsed, bwAllocated, profit
     
     
     def _step(self, action):        
@@ -468,17 +551,39 @@ class ReconfigurationEnvironement(py_environment.PyEnvironment):
                 listListSlicesCost.append(self.scenario.listOfArrival[iteratorTmp])
                 listListSlicesFakeAlloc.append(self.scenario.listOfArrival[iteratorTmp])
                 iteratorTmp+=1
-
+        
+        """
+        if self.timeStep % 150 == 0:
+            print("EnvironementCost %")
+        #if self.timeStep == param.startDynamic:
+            action = 1
+        else:
+            action = 0"""
+        
+        """if self.timeStep == 205:
+            exit()"""
+        
 
         listProfit = []
         listCostVnfUsed = []
         listProfitNoReconf = []
         listCostVnfNoReconf = []
         
+        if self.rewardVersion == 4:
+            listCostVnfNoReconf, listBwAllocatedNoReconf, listProfitNoReconf = self.realAlloc(self.allocateurNoReconf, listListSlicesState) 
+
         #I the action is to reconfigure
         if action == 1:
             
-            listCostVnfNoReconf, listBwAllocatedNoReconf, listProfitNoReconf = self.fakeAlloc(listListSlicesFakeAlloc) 
+            if self.rewardVersion == 4:
+                listCostVnfNoReconfTmp, listBwAllocatedNoReconfTmp, listProfitNoReconfTmp = self.fakeAlloc(self.allocateurNoReconf, listListSlicesCost) 
+                for i in range(len(listProfitNoReconfTmp)):
+                    listProfitNoReconf.append(listProfitNoReconfTmp[i])
+                    #listBwAllocatedNoReconf.append(listBwAllocatedNoReconfTmp[i])
+                    listCostVnfNoReconf.append(listCostVnfNoReconfTmp[i])
+                
+            else:
+                listCostVnfNoReconf, listBwAllocatedNoReconf, listProfitNoReconf = self.fakeAlloc(self.allocateur, listListSlicesFakeAlloc)
             
             if self.evaluation:
                 self.listTimeStepReconf.append(self.timeStep)
@@ -604,7 +709,9 @@ class ReconfigurationEnvironement(py_environment.PyEnvironment):
                 print("Number reconf done {}".format(sum(self.reconfsDone)))
                 print("Reward : {}".format(self.rewardTotal))
                 
-
+                
+                """print("")
+                print("    {}    {}    {}    {}".format(action, realFirstCost, costByMb, reward))"""
     
                 self._state = self.makeState()
                 
@@ -647,7 +754,7 @@ class ReconfigurationEnvironement(py_environment.PyEnvironment):
         
 
             #We complete by a knew fake alloc to compare with more step (numberOfStepsForCost) than just numberOfStepsByState
-            listCostVnfAdditionnal, listBwAllocatedAdditionnal, listProfitAdditionnal = self.fakeAlloc(listListSlicesCost) 
+            listCostVnfAdditionnal, listBwAllocatedAdditionnal, listProfitAdditionnal = self.fakeAlloc(self.allocateur, listListSlicesCost) 
             for i in range(len(listProfit)):
                 listProfitAdditionnal.append(listProfit[i])
                 #listBwAllocatedAdditionnal.append(aaaaa[i])
@@ -674,7 +781,8 @@ class ReconfigurationEnvironement(py_environment.PyEnvironment):
         
         
         self.rewardTotal += reward
-
+        """print("")
+        print("    {}    {}    {}    {}".format(action, realFirstCost, costByMb, reward))"""
         
         self._state = self.makeState()
         
@@ -705,11 +813,57 @@ class ReconfigurationEnvironement(py_environment.PyEnvironment):
             if reconfDone:  
                 reward = sum(profit) - sum(profitNoNeconf) - (self.costReconf*len(profit))
             else:
+                #print("{}    {}    {}".format(self.timeStep, profit,  profitNoNeconf))
                 reward = 0
+                
+        elif self.rewardVersion == 4:
+            if reconfDone:  
+                reward = (sum(profit) - sum(profitNoNeconf) - (self.costReconf*len(profit)))/max(1,float(sum(profitNoNeconf)))*100
+                #print("{} Reward {}     {} - {}    {}".format(self.timeStep, reward, profit, self.costReconf, profitNoNeconf))
+            else:
+                reward = (sum(profit) - sum(profitNoNeconf) )/max(1,float(sum(profitNoNeconf)))*100
+                #print("{} Reward {}     {}    {}".format(self.timeStep, reward, profit, profitNoNeconf))
             
+                
+
+        """for i in self.listVersionReward:
+            for j in self.listCostReconf:
+                if not reconfDone:
+                    rewardTmp = 0
+                else:
+                    
+                    if i == 2:
+                        rewardTmp = sum(costVnfUsedNoNeconf) - sum(costVnfUsed) - (j*len(costVnfUsed))
+                    elif i == 1:
+                        cost = sum(costVnfUsed) + (j*len(costVnfUsed))
+                        if cost >= sum(costVnfUsedNoNeconf):
+                            rewardTmp = -1
+                        else:
+                            cost = sum(costVnfUsedNoNeconf) - cost
+                            rewardTmp = 1+float(cost)/sum(costVnfUsedNoNeconf)
+                    
+                    
+                self.dictReward["Reward-{}_Cost-{}".format(i,j)].append(rewardTmp)"""
                 
         return reward
         
+        
+        """
+        if self.version == 1 or self.version == 2 or self.version ==3:
+            fakeCostByMb = fakeCostVnfsUsed/float(fakeBwAllocated)
+            costByMb = CostVnfsUsed/float(bwAllocated)
+            improv = (fakeCostByMb - costByMb)/float(fakeCostByMb)*100
+        elif self.version == 4:
+            improv = (fakeCostVnfsUsed - CostVnfsUsed)/float(fakeCostVnfsUsed)*100
+        #print(improv)
+        if improv < self.seuilReconf:
+            reward = -1
+            
+        else:
+            reward = improv // self.seuilReconf
+            
+        return reward"""
+    
         
         
     def doIReconfigureNowMBB(self, timeStep, nbSlicesAccepted, nbSlicesRejected, nbSlicesAllocated, topology, functions, listSlicesCurrentlyAllocated, currentAlloc, currentPaths, nbSteps, beta, useLP, stableStop, timeLimit):
@@ -792,11 +946,10 @@ class ReconfigurationEnvironement(py_environment.PyEnvironment):
     def saveEvaluation(self):
         tmp = os.path.join(os.path.join(self.dossierToSave, self.instanceName),self.instanceNum)
         self.allocateur.writeResults(tmp)
-        """
-        fileName = os.path.join(tmp, "infoReconf.csv")
+        #self.allocateurNoReconf.writeResults(tmp)
+        """fileName = os.path.join(tmp, "infoReconf.csv")
         listName = []
         listData = []
-        
         listName.append("timeStep")
         listData.append(self.listTimeStepReconf)
         listName.append("periode")
@@ -822,8 +975,8 @@ class ReconfigurationEnvironement(py_environment.PyEnvironment):
         listName.append("NbSlicesAllocated")
         listData.append(self.listNbSlicesAllocated)
     
-        readWritter.writeCSV(fileName, listName, listData)
-    """
+        readWritter.writeCSV(fileName, listName, listData)"""
+    
         
         
     def action_spec(self):
